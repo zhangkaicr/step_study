@@ -1,0 +1,258 @@
+---
+title: "使用tmerge()函数构建生存分析中的时间依赖协变量"
+author: "翻译自Max Rohde的教程"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 加载包
+
+```{r load-packages}
+# 加载必需的R包
+library(survival)  # 生存分析包，包含tmerge函数
+library(tibble)    # 现代数据框操作
+library(dplyr)     # 数据处理
+library(knitr)     # 表格显示
+```
+
+# 为什么我们需要tmerge？
+
+在生存分析中，我们区分时间无关协变量和时间依赖协变量。时间无关协变量在时间上是恒定的，而时间依赖协变量可以随时间变化。
+
+例如，假设我们正在建模以年为单位的死亡时间，将化学物质暴露作为我们感兴趣的时间依赖协变量。假设我们可以将暴露量化为0、1或2。我们将使用这种暴露和受试者的性别作为模型中的协变量。
+
+为了表示时间依赖协变量，我们需要为每个受试者设置多行，其中每行代表时间依赖协变量的不同值。
+
+以一个开始时暴露=1的受试者为例。然后在4年时，他们的暴露状态变为暴露=0。然后在7年时，他们的暴露状态变为暴露=2。然后受试者在10年时死亡（即，状态=1）。我们需要三行来表示这个受试者，因为有3个不同的时间段：0-4、4-7和7-10。survival包使用名称tstart和tstop来表示每个时间段的开始和结束。因此，在构建时间依赖变量的数据时，该受试者的行将如下所示：
+
+| id | tstart | tstop | exposure | status |
+|----|--------|-------|----------|--------|
+| 1  | 0      | 4     | 1        | 0      |
+| 1  | 4      | 7     | 0        | 0      |
+| 1  | 7      | 10    | 2        | 1      |
+
+# 使用tmerge
+
+## 创建示例数据
+
+首先，我们需要将数据分为两个数据框，一个用于时间无关协变量，一个用于时间依赖协变量。
+
+这是时间无关协变量的一些示例数据。我们有3个受试者，每行包含他们的id、性别、生存时间以及他们是否经历感兴趣的事件（在这种情况下是死亡）。我们使用event = 1表示死亡，event = 0表示删失。
+
+```{r time-independent-data}
+# 创建时间无关协变量数据框
+df_time_ind <- tibble(
+  id = c(1, 2, 3),           # 受试者ID
+  sex = c("M", "F", "F"),     # 性别（M=男性，F=女性）
+  surv_time = c(5, 10, 15),   # 生存时间（年）
+  event = c(1, 1, 0)          # 事件指示器（1=死亡，0=删失）
+)
+
+# 显示数据框
+kable(df_time_ind, caption = "时间无关协变量数据")
+```
+
+这是一些示例时间依赖数据。每个受试者在时间=0时有一个暴露状态记录，以及每当他们的暴露状态发生变化时的另一个记录。例如，在下面的数据中，受试者1有：
+
+- 从时间0到2的暴露状态0
+- 从时间2到4的暴露状态1  
+- 从时间4开始的暴露状态2
+
+```{r time-dependent-data}
+# 创建时间依赖协变量数据框
+df_time_dep <- tibble(
+  id = c(1, 1, 1, 2, 2, 3),     # 受试者ID（每个受试者可能有多行）
+  time = c(0, 2, 4, 0, 7, 0),   # 暴露状态改变的时间点
+  exposure = c(0, 1, 2, 0, 1, 0) # 暴露水平（0, 1, 或 2）
+)
+
+# 显示数据框
+kable(df_time_dep, caption = "时间依赖协变量数据")
+```
+
+我们将使用tmerge函数将这些数据框转换为单个数据框，用于时间依赖生存分析。tmerge函数在格式化时间依赖协变量数据的过程中被多次使用。
+
+首先，我们对独立变量使用tmerge。注意我们调用tmerge时将df_time_ind作为data1和data2参数。我们还必须使用语法event(survival_time_variable, event_indicator_variable)指定id变量和事件变量。在表达式左侧使用名称event是可选的。
+
+```{r tmerge-step1}
+# 第一步：使用tmerge处理时间无关变量
+# 这一步添加tstart、tstop和event列
+df_time_ind <- tmerge(
+  data1 = df_time_ind,    # 基础数据框
+  data2 = df_time_ind,    # 同样的数据框（用于事件信息）
+  id = id,                # 受试者标识符
+  event = event(surv_time, event)  # 定义事件：event(时间变量, 事件指示器)
+)
+
+# 显示处理后的数据框
+kable(df_time_ind, caption = "添加tstart、tstop和event列后的数据")
+```
+
+注意已经添加了tstart、tstop和event变量。
+
+现在要添加时间依赖变量，我们再次调用tmerge，现在将df_time_ind作为data1参数，将df_time_dep作为data2参数。要指定时间依赖暴露变量，我们使用tdc函数，语法为time_dependent_variable = tdc(time, time_dependent_variable)。
+
+```{r tmerge-step2}
+# 第二步：添加时间依赖协变量
+# tdc函数用于处理时间依赖协变量
+df_final <- tmerge(
+  data1 = df_time_ind,     # 来自第一步的数据框
+  data2 = df_time_dep,     # 时间依赖协变量数据框
+  id = id,                 # 受试者标识符
+  exposure = tdc(time, exposure)  # tdc(时间变量, 协变量值)
+)
+
+# 显示最终的数据框
+kable(df_final, caption = "具有正确结构化时间依赖变量的完整数据集")
+```
+
+下面我们有了具有正确结构化时间依赖变量的完整数据集。
+
+最后，使用survival包拟合模型使用一般语法Surv(tstart, tstop, event_indicator_variable)，如下所示，我们拟合Cox比例风险模型。
+
+```{r cox-model}
+# 拟合Cox比例风险模型
+# Surv(tstart, tstop, event)创建生存对象用于时间依赖协变量
+cox_model <- coxph(
+  Surv(tstart, tstop, event) ~ exposure,  # 生存时间 ~ 暴露变量
+  data = df_final                          # 使用最终处理的数据集
+)
+
+# 显示模型结果
+summary(cox_model)
+```
+
+## 模型结果解释
+
+**注意**：在运行Cox模型时，您可能会看到收敛警告。这在小样本数据中是常见的，特别是当事件数量很少时。在实际应用中，您需要更大的样本量来获得稳定的结果。
+
+```{r model-interpretation}
+# 提取模型系数和置信区间
+# 注意：由于样本量小，模型可能不收敛，这是正常的演示现象
+coef_summary <- summary(cox_model)$coefficients
+
+# 检查模型是否收敛
+# 安全地检查迭代次数（某些情况下可能为NULL）
+if (!is.null(cox_model$iter) && !is.null(cox_model$control$iter.max)) {
+  if (cox_model$iter < cox_model$control$iter.max) {
+    cat("模型成功收敛\n")
+  } else {
+    cat("警告：模型未收敛，这在小样本中是常见的\n")
+    cat("在实际分析中，请使用更大的样本量\n\n")
+  }
+} else {
+  cat("模型收敛状态无法确定\n")
+}
+
+# 安全地提取系数（处理可能的数值问题）
+if (nrow(coef_summary) > 0 && !is.na(coef_summary[1, 1])) {
+  hazard_ratio <- exp(coef_summary[1, 1])  # 风险比
+  
+  # 检查系数是否合理（避免极端值）
+  if (abs(coef_summary[1, 1]) < 10) {
+    ci_lower <- exp(coef_summary[1, 1] - 1.96 * coef_summary[1, 3])  # 95%置信区间下限
+    ci_upper <- exp(coef_summary[1, 1] + 1.96 * coef_summary[1, 3])  # 95%置信区间上限
+  } else {
+    ci_lower <- NA  # 极端值时设为NA
+    ci_upper <- NA
+  }
+  
+  p_value <- coef_summary[1, 4]  # p值
+  
+  # 创建结果汇总表
+  result_table <- tibble(
+    "参数" = "暴露水平",
+    "系数" = round(coef_summary[1, 1], 3),
+    "风险比" = ifelse(abs(coef_summary[1, 1]) < 10, round(hazard_ratio, 3), "极端值"),
+    "标准误" = round(coef_summary[1, 3], 3),
+    "P值" = round(p_value, 4),
+    "备注" = ifelse(abs(coef_summary[1, 1]) > 10, "小样本导致的数值不稳定", "正常")
+  )
+  
+  kable(result_table, caption = "Cox回归模型结果汇总")
+} else {
+  cat("模型系数无法提取，可能由于数值问题\n")
+}
+```
+
+## 数据验证
+
+让我们验证我们的数据结构是否正确：
+
+```{r data-validation}
+# 检查每个受试者的时间段是否连续且不重叠
+validation_check <- df_final %>%
+  arrange(id, tstart) %>%  # 按ID和开始时间排序
+  group_by(id) %>%         # 按受试者分组
+  mutate(
+    # 检查时间段是否连续
+    time_gap = tstart - lag(tstop, default = 0),
+    # 检查是否有重叠
+    overlap = tstart < lag(tstop, default = 0)
+  ) %>%
+  ungroup()
+
+# 显示验证结果
+kable(validation_check, caption = "数据结构验证（time_gap应为0，overlap应为FALSE）")
+
+# 汇总验证统计
+cat("数据验证结果：\n")
+cat("- 时间间隙数量（应为0）:", sum(validation_check$time_gap != 0, na.rm = TRUE), "\n")
+cat("- 重叠数量（应为0）:", sum(validation_check$overlap, na.rm = TRUE), "\n")
+cat("- 总观察数:", nrow(df_final), "\n")
+cat("- 受试者数量:", length(unique(df_final$id)), "\n")
+```
+
+# 参考文献
+
+有关更多详细信息，请参阅[此演示文稿](https://maximilianrohde.com/posts/tmerge/)和[此报告](https://maximilianrohde.com/posts/tmerge/)，了解tmerge的更多功能。
+
+## 实际应用建议
+
+在实际研究中使用tmerge时，请注意以下几点：
+
+```{r practical-tips}
+# 1. 检查数据质量
+cat("数据质量检查：\n")
+cat("- 受试者数量:", length(unique(df_final$id)), "\n")
+cat("- 总观察期数:", nrow(df_final), "\n")
+cat("- 事件数量:", sum(df_final$event), "\n")
+cat("- 平均每人观察期数:", round(nrow(df_final) / length(unique(df_final$id)), 1), "\n")
+
+# 2. 建议的最小样本量
+cat("\n建议的最小样本量：\n")
+cat("- 受试者数量: ≥ 50\n")
+cat("- 事件数量: ≥ 10-15\n")
+cat("- 每个协变量至少5-10个事件\n")
+```
+
+## 常见问题和解决方案
+
+### 1. 模型不收敛
+- **原因**：样本量太小，事件数量不足
+- **解决方案**：增加样本量，或使用惩罚回归方法
+
+### 2. 极端系数值
+- **原因**：完全分离或准完全分离
+- **解决方案**：检查数据，考虑合并暴露类别
+
+### 3. 时间段重叠
+- **原因**：数据输入错误或时间记录不准确
+- **解决方案**：仔细检查原始数据，使用数据验证步骤
+
+# 总结
+
+tmerge()函数是survival包中处理时间依赖协变量的强大工具。它允许我们：
+
+1. **结构化时间依赖数据**：将复杂的时间变化协变量转换为生存分析所需的格式
+2. **处理多个时间段**：为每个受试者创建多行，每行代表不同的暴露期
+3. **确保数据完整性**：自动处理时间段的开始和结束，避免重叠或间隙
+4. **支持复杂分析**：使得Cox回归等高级生存分析方法能够正确处理时间变化的风险因素
+
+**重要提醒**：本教程使用的是演示数据（样本量很小），在实际研究中需要足够大的样本量来获得可靠的统计推断。
+
+这种方法在流行病学研究、临床试验和其他需要考虑暴露或治疗随时间变化的研究中特别有用。
